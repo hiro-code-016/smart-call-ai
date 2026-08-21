@@ -1,7 +1,24 @@
-import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import type { AssignmentEvent, CallLog, Intervention, Lead, Outcome, Salesperson } from '@/types';
 import { SALESPEOPLE, SEED_LEADS } from '@/lib/seed';
 import { addDays, defaultFollowUpDays, todayISO } from '@/lib/risk';
+import {
+  initDb,
+  isSeeded,
+  loadLeads,
+  loadSalespeople,
+  seedDatabase,
+  insertLead,
+  insertCall,
+  updateCall,
+  updateLeadStatus,
+  updateFollowUpDate,
+  updateLeadSalesperson,
+  insertAssignment,
+  insertIntervention,
+  resolveIntervention,
+  clearAllData,
+} from '@/lib/db';
 
 export interface NewLeadInput {
   name: string;
@@ -17,11 +34,13 @@ interface Store {
   leads: Lead[];
   highRiskThreshold: number;
   activeSalespersonId: string;
+  loading: boolean;
+  error: string | null;
   setActiveSalesperson: (id: string) => void;
   setHighRiskThreshold: (n: number) => void;
   createLead: (input: NewLeadInput) => Lead;
   reassignLead: (leadId: string, toSalespersonId: string) => void;
-  startCall: (leadId: string) => string; // returns callId
+  startCall: (leadId: string) => string;
   endCall: (leadId: string, callId: string, outcome: Outcome, notes: string) => void;
   setFollowUpDate: (leadId: string, date: string | null) => void;
   flagIntervention: (leadId: string, note: string) => void;
@@ -39,12 +58,38 @@ function uid(prefix: string): string {
 }
 
 export function StoreProvider({ children }: { children: ReactNode }) {
-  const [salespeople] = useState<Salesperson[]>(SALESPEOPLE);
-  const [leads, setLeads] = useState<Lead[]>(() => SEED_LEADS.map((l) => ({ ...l })));
+  const [salespeople, setSalespeople] = useState<Salesperson[]>([]);
+  const [leads, setLeads] = useState<Lead[]>([]);
   const [highRiskThreshold, setHighRiskThreshold] = useState(60);
   const [activeSalespersonId, setActiveSalespersonId] = useState<string>('sp_john');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  const updateLead = useCallback((leadId: string, fn: (l: Lead) => Lead) => {
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        await initDb();
+        const seeded = await isSeeded();
+        if (!seeded) {
+          await seedDatabase(SALESPEOPLE, SEED_LEADS);
+        }
+        const sp = await loadSalespeople();
+        const ld = await loadLeads();
+        if (cancelled) return;
+        setSalespeople(sp);
+        setLeads(ld);
+        setActiveSalespersonId(sp[0]?.id ?? 'sp_john');
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load data');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const updateLeadState = useCallback((leadId: string, fn: (l: Lead) => Lead) => {
     setLeads((prev) => prev.map((l) => (l.id === leadId ? fn(l) : l)));
   }, []);
 
@@ -62,35 +107,32 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       followUpDate: null,
       calls: [],
       assignments: [
-        {
-          id: uid('asg'),
-          at: todayISO(),
-          fromSalespersonId: null,
-          toSalespersonId: input.salespersonId,
-          by: 'manager',
-        },
+        { id: uid('asg'), at: todayISO(), fromSalespersonId: null, toSalespersonId: input.salespersonId, by: 'manager' },
       ],
       interventions: [],
     };
     setLeads((prev) => [lead, ...prev]);
+    void insertLead(lead);
     return lead;
   }, []);
 
   const reassignLead = useCallback(
     (leadId: string, toSalespersonId: string) => {
-      updateLead(leadId, (l) => {
-        if (l.salespersonId === toSalespersonId) return l;
-        const event: AssignmentEvent = {
-          id: uid('asg'),
-          at: todayISO(),
-          fromSalespersonId: l.salespersonId,
-          toSalespersonId,
-          by: 'manager',
-        };
+      const event: AssignmentEvent = {
+        id: uid('asg'),
+        at: todayISO(),
+        fromSalespersonId: null,
+        toSalespersonId,
+        by: 'manager',
+      };
+      updateLeadState(leadId, (l) => {
+        event.fromSalespersonId = l.salespersonId;
         return { ...l, salespersonId: toSalespersonId, assignments: [...l.assignments, event] };
       });
+      void updateLeadSalesperson(leadId, toSalespersonId);
+      void insertAssignment({ ...event, leadId });
     },
-    [updateLead],
+    [updateLeadState],
   );
 
   const startCall = useCallback(
@@ -105,19 +147,21 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         notes: '',
         salespersonId: activeSalespersonId,
       };
-      updateLead(leadId, (l) => ({ ...l, calls: [...l.calls, call] }));
+      updateLeadState(leadId, (l) => ({ ...l, calls: [...l.calls, call] }));
+      void insertCall({ ...call, leadId });
       return callId;
     },
-    [activeSalespersonId, updateLead],
+    [activeSalespersonId, updateLeadState],
   );
 
   const endCall = useCallback(
     (leadId: string, callId: string, outcome: Outcome, notes: string) => {
-      updateLead(leadId, (l) => {
+      const endedAt = todayISO();
+      let durationSec = 0;
+      updateLeadState(leadId, (l) => {
         const calls = l.calls.map((c) => {
           if (c.id !== callId) return c;
-          const endedAt = todayISO();
-          const durationSec = Math.max(1, Math.round((new Date(endedAt).getTime() - new Date(c.startedAt).getTime()) / 1000));
+          durationSec = Math.max(1, Math.round((new Date(endedAt).getTime() - new Date(c.startedAt).getTime()) / 1000));
           return { ...c, endedAt, durationSec, outcome, notes: notes.slice(0, 500) };
         });
 
@@ -136,52 +180,61 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           followUpDate = addDays(base, def);
         }
 
+        void updateCall(callId, endedAt, durationSec, outcome, notes.slice(0, 500));
+        void updateLeadStatus(leadId, status, followUpDate);
         return { ...l, calls, status, followUpDate };
       });
     },
-    [updateLead],
+    [updateLeadState],
   );
 
   const setFollowUpDate = useCallback(
     (leadId: string, date: string | null) => {
-      updateLead(leadId, (l) => ({ ...l, followUpDate: date }));
+      updateLeadState(leadId, (l) => ({ ...l, followUpDate: date }));
+      void updateFollowUpDate(leadId, date);
     },
-    [updateLead],
+    [updateLeadState],
   );
 
   const flagIntervention = useCallback(
     (leadId: string, note: string) => {
-      updateLead(leadId, (l) => {
-        const iv: Intervention = {
-          id: uid('iv'),
-          at: todayISO(),
-          note,
-          status: 'open',
-        };
-        return { ...l, interventions: [...l.interventions, iv] };
-      });
+      const iv: Intervention = {
+        id: uid('iv'),
+        at: todayISO(),
+        note,
+        status: 'open',
+      };
+      updateLeadState(leadId, (l) => ({ ...l, interventions: [...l.interventions, iv] }));
+      void insertIntervention({ ...iv, leadId });
     },
-    [updateLead],
+    [updateLeadState],
   );
 
   const resolveIntervention = useCallback(
     (leadId: string, interventionId: string, note: string) => {
-      updateLead(leadId, (l) => ({
+      const resolvedAt = todayISO();
+      updateLeadState(leadId, (l) => ({
         ...l,
         interventions: l.interventions.map((iv) =>
-          iv.id === interventionId ? { ...iv, status: 'resolved', resolvedAt: todayISO(), resolveNote: note } : iv,
+          iv.id === interventionId ? { ...iv, status: 'resolved', resolvedAt, resolveNote: note } : iv,
         ),
       }));
+      void resolveIntervention(interventionId, resolvedAt, note);
     },
-    [updateLead],
+    [updateLeadState],
   );
 
   const getLead = useCallback((leadId: string) => leads.find((l) => l.id === leadId), [leads]);
 
-  const resetAll = useCallback(() => {
-    setLeads(SEED_LEADS.map((l) => ({ ...l })));
+  const resetAll = useCallback(async () => {
+    await clearAllData();
+    await seedDatabase(SALESPEOPLE, SEED_LEADS);
+    const sp = await loadSalespeople();
+    const ld = await loadLeads();
+    setSalespeople(sp);
+    setLeads(ld);
     setHighRiskThreshold(60);
-    setActiveSalespersonId('sp_john');
+    setActiveSalespersonId(sp[0]?.id ?? 'sp_john');
   }, []);
 
   const value = useMemo<Store>(
@@ -190,6 +243,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       leads,
       highRiskThreshold,
       activeSalespersonId,
+      loading,
+      error,
       setActiveSalesperson: setActiveSalespersonId,
       setHighRiskThreshold,
       createLead,
@@ -202,7 +257,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       getLead,
       resetAll,
     }),
-    [salespeople, leads, highRiskThreshold, activeSalespersonId, createLead, reassignLead, startCall, endCall, setFollowUpDate, flagIntervention, resolveIntervention, getLead, resetAll],
+    [salespeople, leads, highRiskThreshold, activeSalespersonId, loading, error, createLead, reassignLead, startCall, endCall, setFollowUpDate, flagIntervention, resolveIntervention, getLead, resetAll],
   );
 
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>;
