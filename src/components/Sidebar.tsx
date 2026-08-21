@@ -1,7 +1,7 @@
-import { LayoutDashboard, Users, Phone, ShieldAlert, Radio, RotateCcw } from 'lucide-react';
+import { LayoutDashboard, Users, Phone, ShieldAlert, Radio, RotateCcw, BarChart3 } from 'lucide-react';
 import { useStore } from '@/store';
 
-export type View = 'dashboard' | 'leads' | 'workspace' | 'detail';
+export type View = 'dashboard' | 'leads' | 'workspace' | 'analytics' | 'detail';
 
 export interface NavState {
   view: View;
@@ -20,6 +20,7 @@ export function Sidebar({ nav, onNav }: SidebarProps) {
     { key: 'dashboard', label: 'Manager Dashboard', icon: LayoutDashboard, role: 'manager' },
     { key: 'leads', label: 'Lead Management', icon: Users, role: 'manager' },
     { key: 'workspace', label: 'Sales Workspace', icon: Phone, role: 'rep' },
+    { key: 'analytics', label: 'Analytics & Reports', icon: BarChart3, role: 'manager' },
   ];
 
   return (

@@ -6,11 +6,13 @@ import { ManagerDashboard } from '@/components/ManagerDashboard';
 import { LeadManagement } from '@/components/LeadManagement';
 import { SalesWorkspace } from '@/components/SalesWorkspace';
 import { LeadDetail } from '@/components/LeadDetail';
+import { Analytics } from '@/components/Analytics';
 
 const titles: Record<View, { title: string; subtitle: string }> = {
   dashboard: { title: 'Manager Dashboard', subtitle: 'Execution intelligence across your sales floor' },
   leads: { title: 'Lead Management', subtitle: 'Create, assign, and reassign leads' },
   workspace: { title: 'Sales Workspace', subtitle: 'Your assigned leads, prioritized by risk and follow-up' },
+  analytics: { title: 'Analytics & Reports', subtitle: 'Call activity, conversion, and performance insights' },
   detail: { title: 'Lead Detail', subtitle: 'Call tracking, outcomes, and risk intelligence' },
 };
 
@@ -28,6 +30,7 @@ function Shell() {
           {nav.view === 'dashboard' && <ManagerDashboard onOpenLead={openLead} />}
           {nav.view === 'leads' && <LeadManagement onOpenLead={openLead} />}
           {nav.view === 'workspace' && <SalesWorkspace onOpenLead={openLead} />}
+          {nav.view === 'analytics' && <Analytics />}
           {nav.view === 'detail' && nav.leadId && (
             <LeadDetail leadId={nav.leadId} onBack={() => setNav({ view: 'leads' })} />
           )}
